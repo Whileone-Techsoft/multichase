@@ -33,6 +33,9 @@
 #ifndef NUM_COUNTERS
 #define NUM_COUNTERS 256
 #endif
+#define MAX_STATS 4
+
+char *stat_desc[MAX_STATS] = {"Acquires","Fails","Busy","Misc"};
 
 typedef unsigned atomic_t;
 
@@ -43,6 +46,7 @@ typedef union {
 			int counter;
 			int mode;
         } x;
+		atomic_t stats[MAX_STATS];
         char pad[AVOID_FALSE_SHARING];
 } per_thread_t;
 
@@ -104,6 +108,102 @@ static inline void work_section(unsigned long count, int tmp) {
 	//}
 }
 
+static inline void test_mutex_lock_anemic(per_thread_t *args) {
+	int cid=args->x.counter;
+	unsigned long hold_time=global_counter[count_sweep].hold;
+	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	pthread_mutex_t *p=&(global_counter[count_sweep].mutex[cid]);
+	while (sweep_active) {
+		int i,fails=0;
+		for (i=0; i<inc_count ; i++) {
+			int ret=pthread_mutex_lock(p);
+			if (ret==0)
+				pthread_mutex_unlock(p);
+			else
+				fails++;
+			work_section(hold_time,tmp);
+		}
+		__sync_fetch_and_add(&args->stats[0], i);
+		__sync_fetch_and_add(&args->stats[0], fails);
+	}
+	//__sync_fetch_and_add(&args->x.count, tmp); // just so compiler will use tmp
+}
+
+
+static inline void test_mutex_trylock_anemic(per_thread_t *args) {
+	int cid=args->x.counter;
+	unsigned long hold_time=global_counter[count_sweep].hold;
+	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	pthread_mutex_t *p=&(global_counter[count_sweep].mutex[cid]);
+	while (sweep_active) {
+		int busy = 0, fails=0, acquired=0, i;
+		
+		for (i=0; i<inc_count ; i++) {
+			int ret = pthread_mutex_trylock(p);
+			if (ret == EBUSY) { // Simulate skipping the lock
+				busy++;
+				continue;
+			} 
+			if (ret != 0) {
+				fails++;
+				continue;
+			}
+			// Otherwise, lock acquired do critical section
+			pthread_mutex_unlock(p);
+			acquired++;
+			work_section(hold_time,tmp);
+		}
+		__sync_fetch_and_add(&args->stats[0], acquired);
+		__sync_fetch_and_add(&args->stats[1], fails);
+		__sync_fetch_and_add(&args->stats[2], busy);
+	}
+	//__sync_fetch_and_add(&args->x.count, tmp); // just so compiler will use tmp
+}
+
+
+static inline void test_mutex_trylock(per_thread_t *args) {
+	int cid=args->x.counter;
+	unsigned long hold_time=global_counter[count_sweep].hold;
+	unsigned long lock_time=global_counter[count_sweep].lock;
+	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	pthread_mutex_t *p=&(global_counter[count_sweep].mutex[cid]);
+	while (sweep_active) {
+		int busy = 0, fails=0, acquired=0, i;
+		
+		for (i=0; i<inc_count ; i++) {
+			int ret = pthread_mutex_trylock(p);
+			if (ret == EBUSY) { // Simulate skipping the lock
+				work_section(hold_time,tmp);
+				busy++;
+				continue;
+			} 
+			if (ret != 0) {
+				fails++;
+				continue;
+			}
+			// Otherwise, lock acquired do critical section
+			work_section(lock_time,tmp);
+			pthread_mutex_unlock(p);
+			acquired++;
+			work_section(hold_time,tmp);
+		}
+		__sync_fetch_and_add(&args->stats[0], acquired);
+		__sync_fetch_and_add(&args->stats[1], fails);
+		__sync_fetch_and_add(&args->stats[2], busy);
+	}
+	//__sync_fetch_and_add(&args->x.count, tmp); // just so compiler will use tmp
+}
+
+
 static inline void test_mutex_lock(per_thread_t *args) {
 	int cid=args->x.counter;
 	unsigned long lock_time=global_counter[count_sweep].lock;
@@ -115,23 +215,15 @@ static inline void test_mutex_lock(per_thread_t *args) {
 		if (delay_mask & (1u<<args->x.cpu)) {
 				sleep(1);
 		}
-		if (lock_time>0)
-			for (i=0; i<inc_count ; i++) {
-				pthread_mutex_lock(p);
-				work_section(lock_time,tmp);
-				pthread_mutex_unlock(p);
-				work_section(hold_time,tmp);
-			}
-		else {
-			for (i=0; i<inc_count ; i++) {
-				pthread_mutex_lock(p);
-				pthread_mutex_unlock(p);
-				work_section(hold_time,tmp);
-			}
+		for (i=0; i<inc_count ; i++) {
+			pthread_mutex_lock(p);
+			work_section(lock_time,tmp);
+			pthread_mutex_unlock(p);
+			work_section(hold_time,tmp);
 		}
-		__sync_fetch_and_add(&args->x.count, i);
+		__sync_fetch_and_add(&args->stats[0], i);
 	}
-	__sync_fetch_and_add(&args->x.count, tmp);
+	//__sync_fetch_and_add(&args->x.count, tmp); // just so compiler will use tmp
 }
 
 static inline void test_sync_fetch_and_add(per_thread_t *args) {
@@ -146,7 +238,8 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1););
 				}
-				__sync_fetch_and_add(&args->x.count, 50*i);
+				__sync_fetch_and_add(&args->stats[0], 50*i);
+
 		}
 
 		if (delay_mask & (1u<<args->x.cpu)) {
@@ -156,7 +249,7 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1); cpu_relax(););
 				}
-				__sync_fetch_and_add(&args->x.count, 50*i);
+				__sync_fetch_and_add(&args->stats[0], 50*i);
 		}
 	}
 	
@@ -174,7 +267,7 @@ static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST););
 				}
-				__sync_fetch_and_add(&args->x.count, 50*i);
+				__sync_fetch_and_add(&args->stats[0], 50*i);
 		}
 
 		if (delay_mask & (1u<<args->x.cpu)) {
@@ -184,7 +277,7 @@ static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); cpu_relax(););
 				}
-				__sync_fetch_and_add(&args->x.count, 50*i);
+				__sync_fetch_and_add(&args->stats[0], 50*i);
 		}
 	}
 	
@@ -202,6 +295,7 @@ static void *worker(void *_args)
                 perror("sched_setaffinity");
                 exit(1);
         }
+		unsigned long lock_time=global_counter[0].lock;
 
         wait_for_startup();
 
@@ -210,7 +304,16 @@ static void *worker(void *_args)
 				test_atomic_fetch_and_add(args);
 				break;
 			case 2:
-				test_mutex_lock(args);
+				if (lock_time > 0)
+					test_mutex_lock(args);
+				else
+					test_mutex_lock_anemic(args);
+				break;
+			case 3:
+				if (lock_time > 0)
+					test_mutex_lock(args);
+				else
+					test_mutex_trylock_anemic(args);
 				break;
 			default:
 				test_sync_fetch_and_add(args);
@@ -227,6 +330,7 @@ int main(int argc, char **argv)
 	int verbosity=0, mode=0, lock_time=0, hold_time=0, max_relax=2, mask_uniq=1;
 	static double spacer=0.;
 	size_t req_threads=0;
+	int used_stats=1;
 
         delay_mask = 0;
         while ((c = getopt(argc, argv, "d:s:n:t:v:N:r:m:l:h:i:T:")) != -1) {
@@ -247,6 +351,8 @@ int main(int argc, char **argv)
                         mode = strtoul(optarg, 0, 0);
 						if (mode>1) 
 							max_relax=1;
+						if (mode == 3)
+							used_stats = 3;
                         break;
                 case 'l':
                         lock_time = strtoul(optarg, 0, 0);
@@ -338,7 +444,7 @@ usage:
 
         wait_for_startup();
 
-        atomic_t *samples = calloc(req_threads, sizeof(*samples));
+        atomic_t *samples = calloc(req_threads, sizeof(*samples) * MAX_STATS);
 
         printf("results are avg latency per locked increment in ns, one column per thread\n");
         printf("cpu,");
@@ -347,7 +453,7 @@ usage:
         }
         printf("avg,stdev,min,max\n");
 	char msg[256];
-	stat_t stats[2][COUNT_SWEEP_MAX];
+	stat_t stats[2][COUNT_SWEEP_MAX][MAX_STATS];
 	stat_t global_stats[2];
 	sprintf(msg,"Unrelaxed summary across %d global counts [latency avg in ns, bw in ops/mSec]",COUNT_SWEEP_MAX);
 	stat_init(&global_stats[0],msg);
@@ -355,11 +461,13 @@ usage:
 	stat_init(&global_stats[1],msg);
 	if (sweep_count > COUNT_SWEEP_MAX)
 		sweep_count = COUNT_SWEEP_MAX;
-        for (count_sweep = 0; count_sweep < sweep_count; ++count_sweep) {
+    for (count_sweep = 0; count_sweep < sweep_count; ++count_sweep) {
 		for (relaxed = 0; relaxed < max_relax; ++relaxed) {
 			sprintf(msg,"Global counter %d %s [bw in ops/mSec per thread, latency in ns]",count_sweep,relaxed ? "relaxed:" : "unrelaxed:");
 			printf("%s\n",msg);
-			stat_init(&stats[relaxed][count_sweep],msg);
+			for (j=0; j < used_stats ; j++) {
+				stat_init(&stats[relaxed][count_sweep][j],msg);
+			}
 
 			uint64_t last_stamp = now_nsec();
 			size_t sample_nr;
@@ -367,7 +475,10 @@ usage:
 			for (sample_nr = 0; sample_nr < max_samples; ++sample_nr) {
 				usleep(sample_interval);
 				for (u = 0; u < req_threads; ++u) {
-						samples[u] = __sync_lock_test_and_set(&thread_args[u].x.count, 0);
+					for (j=0; j < used_stats ; j++) {
+						samples[u*MAX_STATS+j] = __sync_lock_test_and_set(&thread_args[u].stats[j], 0);
+						//samples[u] = __sync_lock_test_and_set(&thread_args[u].x.count, 0);
+					}
 				}
 				uint64_t stamp = now_nsec();
 				int64_t time_delta = stamp - last_stamp;
@@ -376,39 +487,57 @@ usage:
 				// throw away the first sample to avoid race issues at startup / mode switch
 				if (sample_nr == 0) continue;
 
-				double sum = 0.;
-				double sum_squared = 0.;
-				double max=0.0,min=1e100;
-				for (u = 0; u < req_threads; ++u) {
-						double s = time_delta / (double)samples[u];
+				for (j=0; j < used_stats ; j++) { // for each stat aggregate and print data for all threads
+					char line[128]="";
+					char *p=line;
+					double sum = 0.;
+					double sum_squared = 0.;
+					double max=0.0,min=1e100;
+					int nval=0;
+					
+					p+=sprintf(p,"%s,",stat_desc[j]);
+					for (u = 0; u < req_threads; ++u) {
+						double val = (double)samples[u*MAX_STATS+j];
+						if (val>0)
+							nval++;
+						double s = time_delta / val;
 						if (min > s) min=s;
 						if (max < s) max=s;
 						//Get BW stats in ops per msec instead of per ns.
-						double bwt=(double)samples[u] * 1000000.0 / (double)time_delta;
-						bw += bwt;
-						printf(",%.1f", s);
+						double bwt = val * 1000000.0 / (double)time_delta;
+						if (j==0) // for stat 0, accumulate bw for all threads
+							bw += bwt; 
+						p+=sprintf(p,",%.1f", s);
 						sum += s;
 						sum_squared += s*s;
-						stat_add(&stats[relaxed][count_sweep],s,bwt);
+						stat_add(&stats[relaxed][count_sweep][j],s,bwt);
+					}
+					p+=sprintf(p,",%.1f,%.1f,%.1f,%.1f\n",
+							sum / req_threads,
+							sqrt((sum_squared - sum*sum/req_threads)/(req_threads-1)),
+							min,max);
+					if (nval>0)
+						printf("%s",line);
 				}
-				printf(",%.1f,%.1f,%.1f,%.1f\n",
-						sum / req_threads,
-						sqrt((sum_squared - sum*sum/req_threads)/(req_threads-1)),
-						min,max);
 			}
-			stat_update(&stats[relaxed][count_sweep]);
+			for (j=0; j < used_stats ; j++) {
+				stat_update(&stats[relaxed][count_sweep][j]);
+			}
 			stat_add(&global_stats[relaxed],
-				stats[relaxed][count_sweep].latency.avg,
+				stats[relaxed][count_sweep][0].latency.avg,
 				bw/(double)sample_nr);
 		}
 	}
 	sweep_active=0;
 	if (verbosity > 0) { 
-		for (relaxed = 0; relaxed < max_relax; ++relaxed) 
-			stat_print(&stats[relaxed][0]);
+		for (relaxed = 0; relaxed < max_relax; ++relaxed) {
+			for (j=0; j < used_stats ; j++) {
+				stat_print(&stats[relaxed][0][j]);
+			}
+		}
 		if (verbosity > 1) {
 			for (count_sweep = 1; count_sweep < sweep_count; ++count_sweep) {
-				stat_print(&stats[0][count_sweep]);
+				stat_print(&stats[0][count_sweep][0]);
 			}
 		}
 		for (relaxed = 0; relaxed < max_relax; ++relaxed) 
