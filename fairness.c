@@ -204,6 +204,71 @@ static inline void test_mutex_trylock(per_thread_t *args) {
 }
 
 
+static inline void test_malloc(per_thread_t *args) {
+	int cid=args->x.counter;
+	unsigned long block_work=global_counter[count_sweep].hold;
+	unsigned long block_size=global_counter[count_sweep].lock;
+	unsigned long block_count = inc_count;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	char **block = (char **)malloc(inc_count);
+	int rounds = 0;
+	while (sweep_active) {
+		unsigned long i,j,tmp=0;
+		
+		for (i=0; i<block_count ; i++) {
+			block[i] = (char *)malloc(block_size * sizeof(char));
+			memset(block[i], 0x55, block_size);
+			for (j=0 ; j<block_work; j++) {
+				block[i][j*64 % block_size] ^= cid++; 				
+			}
+		}
+		tmp += block[cid % block_count][rounds++ % block_size];
+		for (i=0; i<block_count ; i++) {
+			free(block[i]);
+		}
+		__sync_fetch_and_add(&args->stats[0], block_count);
+		__sync_fetch_and_add(&args->stats[1], tmp);
+	}
+}
+
+
+unsigned long block_sizes[] = {5, 21, 32, 55, 256, 12, 8, 128};
+
+static inline void test_malloc_rand(per_thread_t *args) {
+	int cid=args->x.counter;
+	unsigned long block_work=global_counter[count_sweep].hold;
+	unsigned long block_count = inc_count;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	char **block = (char **)malloc(inc_count);
+	unsigned long *last_size = (unsigned long *)malloc(inc_count);
+	int round = 0;
+	while (sweep_active) {
+		unsigned long i,j,tmp=0;
+		
+		for (i=0; i<block_count ; i++) {
+			unsigned long block_size = block_sizes[(i^round) % sizeof(block_sizes)/sizeof(unsigned long)];
+			last_size[i]=block_size;
+			block[i] = (char *)malloc(block_size * sizeof(char));
+			memset(block[i], 0x55, block_size);
+			for (j=0 ; j<block_work; j++) {
+				block[i][j*64 % block_size] ^= cid++; 				
+			}
+		}
+		unsigned int id = cid % block_count;
+		tmp += block[id][round++ % last_size[id]];
+		for (i=0; i<block_count ; i++) {
+			free(block[i]);
+		}
+		__sync_fetch_and_add(&args->stats[0], block_count);
+		__sync_fetch_and_add(&args->stats[1], tmp);
+	}
+}
+
+
 static inline void test_mutex_lock(per_thread_t *args) {
 	int cid=args->x.counter;
 	unsigned long lock_time=global_counter[count_sweep].lock;
@@ -311,9 +376,16 @@ static void *worker(void *_args)
 				break;
 			case 3:
 				if (lock_time > 0)
-					test_mutex_lock(args);
+					test_mutex_trylock(args);
 				else
 					test_mutex_trylock_anemic(args);
+				break;
+			case 4:
+				stat_desc[0] = "Blocks";
+				if (lock_time > 0)
+					test_malloc(args);
+				else
+					test_malloc_rand(args);
 				break;
 			default:
 				test_sync_fetch_and_add(args);
@@ -386,7 +458,16 @@ usage:
                                 "by default runs one thread on each cpu, use taskset(1) to\n"
                                 "restrict operation to fewer cpus/threads.\n"
                                 "the optional delay_mask specifies a mask of cpus on which to delay\n"
-                                "the startup.\n", argv[0]);
+                                "the startup.\n"
+								"-n : set number of samples\n"
+								"-m : set mode (1=atomic, 2=mutex, 3=trylock, 4=malloc)\n"
+								"l : lock time for mutex, block size for malloc\n"
+								"h : work (hold parallel iterations for mutex, iterations over memory for malloc)\n"
+								"T : threads to create\n"
+								"N : number of loop iterations for mutex, or number of blocks for malloc\n"
+								"t : sampling interval\n"
+								"v : verbosity for extra stats\n"
+								, argv[0]);
                 exit(1);
         }
 
