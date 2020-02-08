@@ -403,9 +403,10 @@ int main(int argc, char **argv)
 	static double spacer=0.;
 	size_t req_threads=0;
 	int used_stats=1;
+	int captive_mutex=0;
 
         delay_mask = 0;
-        while ((c = getopt(argc, argv, "d:s:n:t:v:N:r:m:l:h:i:T:")) != -1) {
+        while ((c = getopt(argc, argv, "d:s:n:t:v:N:r:m:l:h:i:T:M:")) != -1) {
                 switch (c) {
                 case 'd':
                         delay_mask = strtoul(optarg, 0, 0);
@@ -418,6 +419,9 @@ int main(int argc, char **argv)
                         break;
                 case 'T':
                         req_threads = strtoul(optarg, 0, 0);
+                        break;
+                case 'M':
+                        captive_mutex = strtoul(optarg, 0, 0);
                         break;
                 case 'm':
                         mode = strtoul(optarg, 0, 0);
@@ -467,6 +471,7 @@ usage:
 								"N : number of loop iterations for mutex, or number of blocks for malloc\n"
 								"t : sampling interval\n"
 								"v : verbosity for extra stats\n"
+								"M : Hold mutex captive (for trylock)\n"
 								, argv[0]);
                 exit(1);
         }
@@ -492,8 +497,12 @@ usage:
 			global_counter[i].lock=lock_time;
 			global_counter[i].hold=hold_time;
 			
-			for (j=0; j<NUM_COUNTERS; j++) 
+			for (j=0; j<NUM_COUNTERS; j++) {
 				pthread_mutex_init(&global_counter[i].mutex[j],NULL);
+				if (captive_mutex > 0) {
+					pthread_mutex_lock(&global_counter[i].mutex[j]);
+				}
+			}
 		}
 		
 
