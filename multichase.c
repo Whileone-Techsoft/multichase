@@ -713,8 +713,7 @@ usage:
                 genchase_args.total_memory -= genchase_args.total_memory % genchase_args.tlb_locality;
         }
 
-        if (sizeof(perm_t) < sizeof(size_t)
-                && ((uint64_t)genchase_args.total_memory / genchase_args.stride) != (genchase_args.total_memory / genchase_args.stride)) {
+        if (sizeof(perm_t) < sizeof(size_t)) {
                 fprintf(stderr, "too many elements required -- maximum supported is %"PRIu64"\n",
                         (UINT64_C(1) << 8*sizeof(perm_t)));
                 exit(1);
