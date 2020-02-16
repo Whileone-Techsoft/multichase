@@ -207,14 +207,14 @@ static inline void test_malloc(per_thread_t *args) {
 	if (delay_mask & (1u<<args->x.cpu)) {
 			sleep(1);
 	}
-	char **block = (char **)malloc(inc_count);
+	char **block = (char **)malloc(block_count * sizeof(char *));
 	int rounds = 0;
 	while (sweep_active) {
 		unsigned long i,j,tmp=0;
 		
 		for (i=0; i<block_count ; i++) {
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			memset(block[i], 0x55, block_size);
+			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
 				block[i][j*64 % block_size] ^= cid++; 				
 			}
@@ -238,8 +238,8 @@ static inline void test_malloc_rand(per_thread_t *args) {
 	if (delay_mask & (1u<<args->x.cpu)) {
 			sleep(1);
 	}
-	char **block = (char **)malloc(inc_count);
-	unsigned long *last_size = (unsigned long *)malloc(inc_count);
+	char **block = (char **)calloc(block_count , sizeof(char *));
+	unsigned long *last_size = (unsigned long *)calloc(block_count , sizeof(unsigned long));
 	int round = 0;
 	while (sweep_active) {
 		unsigned long i,j,tmp=0;
@@ -248,9 +248,9 @@ static inline void test_malloc_rand(per_thread_t *args) {
 			unsigned long block_size = block_sizes[(i^round) % sizeof(block_sizes)/sizeof(unsigned long)];
 			last_size[i]=block_size;
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			memset(block[i], 0x55, block_size);
+			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
-				block[i][j*64 % block_size] ^= cid++; 				
+				block[i][(j*64) % block_size] ^= cid++; 				
 			}
 		}
 		unsigned int id = cid % block_count;
@@ -272,8 +272,8 @@ static inline void test_malloc_frag(per_thread_t *args) {
 	if (delay_mask & (1u<<args->x.cpu)) {
 			sleep(1);
 	}
-	char **block = (char **)malloc(inc_count);
-	unsigned long *last_size = (unsigned long *)malloc(inc_count);
+	char **block = (char **)calloc(block_count, sizeof(char *));
+	unsigned long *last_size = (unsigned long *)calloc(block_count , sizeof(unsigned long));
 	int round = 0;
 	while (sweep_active) {
 		unsigned long i,j,tmp=0;
@@ -282,7 +282,7 @@ static inline void test_malloc_frag(per_thread_t *args) {
 			unsigned long block_size = block_sizes[(i^round) % sizeof(block_sizes)/sizeof(unsigned long)];
 			last_size[i]=block_size;
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			memset(block[i], 0x55, block_size);
+			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
 				block[i][j*64 % block_size] ^= cid++; 				
 			}
@@ -296,20 +296,22 @@ static inline void test_malloc_frag(per_thread_t *args) {
 			while (block[i] == NULL) { // Find a block to free
 				i = (i+1) % block_count;
 			}
-			free(block[i]);
 			tmp += (unsigned long)(block[i]) & 3;
-			block[i]=NULL;
+			free(block[i]);
 			freed_blocks++;
+			block[i]=NULL;
 		}
-		__sync_fetch_and_add(&args->stats[0], block_count);
+		__sync_fetch_and_add(&args->stats[0], freed_blocks);
+		freed_blocks=0;
 		// Now free the rest of the blocks
 		for (i=0; i<block_count ; i++) {
 			if (block[i] != NULL) { // Find a block to free
 				free(block[i]);;
+				freed_blocks++;
 			}
 			block[i] = NULL;
 		}
-		__sync_fetch_and_add(&args->stats[0], block_count);
+		__sync_fetch_and_add(&args->stats[0], freed_blocks);
 		__sync_fetch_and_add(&args->stats[1], tmp);
 	}
 	free(last_size);
