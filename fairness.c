@@ -67,6 +67,7 @@ global_t global_counter[COUNT_SWEEP_MAX];
 static volatile int relaxed;
 static volatile int count_sweep=0;
 static volatile int sweep_active=1;
+static size_t req_threads=0;
 
 
 static pthread_mutex_t wait_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -81,10 +82,10 @@ static void wait_for_startup(void)
         pthread_mutex_lock(&wait_mutex);
         --nr_to_startup;
         if (nr_to_startup) {
-                pthread_cond_wait(&wait_cond, &wait_mutex);
+			pthread_cond_wait(&wait_cond, &wait_mutex);
         }
         else {
-                pthread_cond_broadcast(&wait_cond);
+			pthread_cond_broadcast(&wait_cond);
         }
         pthread_mutex_unlock(&wait_mutex);
 }
@@ -105,6 +106,45 @@ void __attribute__((noinline, optimize("no-unroll-loops"))) blackhole(unsigned l
 static inline void work_section(unsigned long count, int tmp) {
 	blackhole(count);
 }
+
+
+static volatile int first=1;
+static void test_broadcast(void)
+{
+        // wait for everyone to spawn
+        pthread_mutex_lock(&wait_mutex);
+		if (first) {
+			first=0;
+			nr_to_startup = req_threads;
+		}
+        --nr_to_startup;
+        if (nr_to_startup) {
+			pthread_cond_wait(&wait_cond, &wait_mutex);
+        }
+        else {
+			nr_to_startup = req_threads;
+			pthread_cond_broadcast(&wait_cond);
+        }
+        pthread_mutex_unlock(&wait_mutex);
+}
+
+
+static inline void test_cond(per_thread_t *args) {
+	unsigned long parallel_time=global_counter[count_sweep].hold;
+	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	while (sweep_active) {
+		int i;
+		for (i=0; i<inc_count ; i++) {
+			test_broadcast();
+			work_section(parallel_time,tmp);
+		}
+		__sync_fetch_and_add(&args->stats[0], i);
+	}
+}
+
 
 static inline void test_mutex_lock_anemic(per_thread_t *args) {
 	int cid=args->x.counter;
@@ -440,6 +480,9 @@ static void *worker(void *_args)
 				stat_desc[0] = "Blocks";
 				test_malloc_frag(args);
 				break;
+			case 7:
+				test_cond(args);
+				break;
 			default:
 				test_sync_fetch_and_add(args);
 				break;
@@ -454,7 +497,6 @@ int main(int argc, char **argv)
 	int sample_interval=500000;
 	int verbosity=0, mode=0, lock_time=0, hold_time=0, max_relax=2, mask_uniq=1;
 	static double spacer=0.;
-	size_t req_threads=0;
 	int used_stats=1;
 	int captive_mutex=0;
 
@@ -518,13 +560,13 @@ usage:
 							"the startup.\n"
 							"-n : set number of samples\n"
 							"-m : set mode (1=atomic, 2=mutex, 3=trylock, 4=malloc)\n"
-							"l : lock time for mutex, block size for malloc\n"
-							"h : work (hold parallel iterations for mutex, iterations over memory for malloc)\n"
-							"T : threads to create\n"
-							"N : number of loop iterations for mutex, or number of blocks for malloc\n"
-							"t : sampling interval\n"
-							"v : verbosity for extra stats\n"
-							"M : Hold mutex captive (for trylock)\n"
+							"-l : lock time for mutex, block size for malloc\n"
+							"-h : work (hold parallel iterations for mutex, iterations over memory for malloc)\n"
+							"-T : threads to create\n"
+							"-N : number of loop iterations for mutex, or number of blocks for malloc\n"
+							"-t : sampling interval\n"
+							"-v : verbosity for extra stats\n"
+							"-M : Hold mutex captive (for trylock)\n"
 							, argv[0]);
 			exit(1);
 	}
@@ -638,7 +680,7 @@ usage:
 					double max=0.0,min=1e100;
 					int nval=0;
 					
-					p+=sprintf(p,"%s,",stat_desc[j]);
+					p+=sprintf(p,"%s",stat_desc[j]);
 					for (u = 0; u < req_threads; ++u) {
 						double val = (double)samples[u*MAX_STATS+j];
 						if (val>0)
