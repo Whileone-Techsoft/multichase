@@ -35,7 +35,8 @@
 #endif
 #define MAX_STATS 4
 
-char *stat_desc[MAX_STATS] = {"Acquires","Fails","Busy","Misc"};
+char *stat_desc[MAX_STATS] = {"Acquires","NFails","NBusy","NMisc"};
+static char full_name[80];
 
 typedef unsigned atomic_t;
 
@@ -165,7 +166,7 @@ static inline void test_mutex_lock_anemic(per_thread_t *args) {
 			work_section(hold_time,tmp);
 		}
 		__sync_fetch_and_add(&args->stats[0], i);
-		__sync_fetch_and_add(&args->stats[0], fails);
+		__sync_fetch_and_add(&args->stats[1], fails);
 	}
 }
 
@@ -254,7 +255,6 @@ static inline void test_malloc(per_thread_t *args) {
 		
 		for (i=0; i<block_count ; i++) {
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
 				block[i][j*64 % block_size] ^= cid++; 				
 			}
@@ -265,6 +265,62 @@ static inline void test_malloc(per_thread_t *args) {
 		}
 		__sync_fetch_and_add(&args->stats[0], block_count);
 		__sync_fetch_and_add(&args->stats[1], tmp);
+	}
+}
+
+
+static void *null_thread(void *vp) {
+	unsigned long long *arg = (unsigned long long *)vp;
+	unsigned long long null_hold = global_counter[count_sweep].hold;
+	work_section(null_hold, 0);
+	*arg = null_hold;
+	pthread_exit(vp);
+	return NULL;
+}
+
+/*
+	Test thread creation latencies, allow created thread to do some work.
+*/
+static inline void test_thread_create(per_thread_t *args) {
+	unsigned long thread_count = inc_count;
+	unsigned long long null_hold = global_counter[count_sweep].hold;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	pthread_t *tag = (pthread_t *)malloc(sizeof(pthread_t) * thread_count);
+	unsigned long long *retvals   = (unsigned long long *)malloc(sizeof(unsigned long long) * thread_count);
+	int C=0;
+	while (sweep_active) {
+		unsigned long i;
+		int created=0, ok=0, fails=0, incomplete=0;
+		C++;
+		for (i=0; i<thread_count ; i++) {
+			retvals[i] = 0;
+			tag[i] = 0;
+			int err = pthread_create(&tag[i], NULL, null_thread, &retvals[i]);
+			if (err == 0) {
+				created++;
+			} else {
+				fails++;
+				tag[i] = 0;
+			}
+		}
+		for (i=0; i<thread_count ; i++) {
+			unsigned long long *ret=0;
+			if (tag[i] != 0) {
+				pthread_join(tag[i], (void **)&ret);
+				tag[i]=0;
+				if (*ret == null_hold) {
+					ok++;
+				} else {
+					incomplete++;
+				}
+			}
+		}
+		__sync_fetch_and_add(&args->stats[0], created);
+		__sync_fetch_and_add(&args->stats[1], fails);
+		__sync_fetch_and_add(&args->stats[2], ok);
+		__sync_fetch_and_add(&args->stats[3], incomplete);
 	}
 }
 
@@ -288,7 +344,6 @@ static inline void test_malloc_rand(per_thread_t *args) {
 			unsigned long block_size = block_sizes[(i^round) % sizeof(block_sizes)/sizeof(unsigned long)];
 			last_size[i]=block_size;
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
 				block[i][(j*64) % block_size] ^= cid++; 				
 			}
@@ -322,7 +377,6 @@ static inline void test_malloc_frag(per_thread_t *args) {
 			unsigned long block_size = block_sizes[(i^round) % sizeof(block_sizes)/sizeof(unsigned long)];
 			last_size[i]=block_size;
 			block[i] = (char *)malloc(block_size * sizeof(char));
-			//memset(block[i], 0x55, block_size);
 			for (j=0 ; j<block_work; j++) {
 				block[i][j*64 % block_size] ^= cid++; 				
 			}
@@ -436,6 +490,33 @@ static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 	
 }
 
+char *test_name[] = {
+	"Sync fetch and add",
+	"Atomic fetch and add",
+	"pthread_mutex lock",
+	"pthread_mutex trylock",
+	"malloc",
+	"malloc Rand",
+	"malloc Frag",
+	"pthread_cond",
+	"pthread_create"
+};
+
+
+static inline char *get_test_name(int mode, int lock_time, int captive) {
+	char *top = test_name[mode];
+	char *tag = "";
+	if (lock_time == 0 && strstr(top,"malloc") != NULL) {
+		tag = " anemic";
+	}
+	if (captive > 0 && strstr(top,"mutex") != NULL ) {
+		tag = " captive";
+	}
+	sprintf(full_name,"TEST,%s%s\n",top, tag);
+	return full_name;
+}
+
+
 static void *worker(void *_args)
 {
         per_thread_t *args = _args;
@@ -483,6 +564,13 @@ static void *worker(void *_args)
 			case 7:
 				test_cond(args);
 				break;
+			case 8:
+				stat_desc[0] = "Threads";
+				stat_desc[1] = "NFails";
+				stat_desc[2] = "NComplete";
+				stat_desc[3] = "NIncomplete";
+				test_thread_create(args);
+				break;
 			default:
 				test_sync_fetch_and_add(args);
 				break;
@@ -520,10 +608,10 @@ int main(int argc, char **argv)
 					break;
 			case 'm':
 					mode = strtoul(optarg, 0, 0);
-					if (mode>1) 
+					if (mode>1) {
 						max_relax=1;
-					if (mode == 3)
-						used_stats = 3;
+						used_stats = 4;
+					}
 					break;
 			case 'l':
 					lock_time = strtoul(optarg, 0, 0);
@@ -572,6 +660,25 @@ usage:
 	}
 
 	setvbuf(stdout, NULL, _IONBF, BUFSIZ);
+	char *myname = get_test_name(mode, lock_time, captive_mutex);
+	printf("%s", myname);
+	if (strstr(myname, "mutex") || strstr(myname, "cond")) {
+		printf("lock time,%d\n", lock_time);
+		printf("hold time,%d\n", hold_time);
+		printf("iterations per update,%d\n", inc_count);
+	}
+	if (strstr(myname, "malloc")) {
+		printf("block size,%d\n", lock_time);
+		printf("work per block,%d\n", hold_time);
+		printf("number of blocks,%d\n", inc_count);
+	}
+	if (strstr(myname, "pthread_create")) {
+		printf("number of dummy threads,%d\n", inc_count);
+		printf("work per dummy thread,%d\n", hold_time);
+	}
+	printf("Threads %ld\n", req_threads);
+	
+	
 
 	// find the active cpus
 	cpu_set_t cpus;
@@ -679,6 +786,8 @@ usage:
 					double sum_squared = 0.;
 					double max=0.0,min=1e100;
 					int nval=0;
+					int report_bw = (stat_desc[j][0] == 'N') ? 1 : 0;
+					
 					
 					p+=sprintf(p,"%s",stat_desc[j]);
 					for (u = 0; u < req_threads; ++u) {
@@ -692,6 +801,8 @@ usage:
 						double bwt = val * 1000000.0 / (double)time_delta;
 						if (j==0) // for stat 0, accumulate bw for all threads
 							bw += bwt; 
+						if (report_bw) 
+							s=bwt;
 						p+=sprintf(p,",%.1f", s);
 						sum += s;
 						sum_squared += s*s;
