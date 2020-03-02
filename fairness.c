@@ -277,6 +277,8 @@ static inline void test_malloc(per_thread_t *args) {
 	if (delay_mask & (1u<<args->x.cpu)) {
 			sleep(1);
 	}
+	if (block_size < 1) 
+		block_size = 1;
 	char **block = (char **)malloc(block_count * sizeof(char *));
 	int rounds = 0;
 	while (sweep_active) {
@@ -449,12 +451,12 @@ static inline void test_mutex_lock(per_thread_t *args) {
 	unsigned long lock_time=global_counter[count_sweep].lock;
 	unsigned long hold_time=global_counter[count_sweep].hold;
 	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
 	while (sweep_active) {
 		pthread_mutex_t *p=&(global_counter[count_sweep].mutex[cid]);
 		int i;
-		if (delay_mask & (1u<<args->x.cpu)) {
-				sleep(1);
-		}
 		for (i=0; i<inc_count ; i++) {
 			pthread_mutex_lock(p);
 			work_section(lock_time,tmp);
@@ -467,12 +469,12 @@ static inline void test_mutex_lock(per_thread_t *args) {
 
 static inline void test_sync_fetch_and_add(per_thread_t *args) {
 	int cid=args->x.counter;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
 	while (sweep_active) {
 		atomic_t *p=&(global_counter[count_sweep].x[cid].count);
 		int i;
-		if (delay_mask & (1u<<args->x.cpu)) {
-				sleep(1);
-		}
 		while (!relaxed) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1););
@@ -481,9 +483,6 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 
 		}
 
-		if (delay_mask & (1u<<args->x.cpu)) {
-				sleep(1);
-		}
 		while (relaxed) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1); cpu_relax(););
@@ -496,21 +495,17 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 
 static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 	int cid=args->x.counter;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
 	while (sweep_active) {
 		atomic_t *p=&(global_counter[count_sweep].x[cid].count);
 		int i;
-		if (delay_mask & (1u<<args->x.cpu)) {
-				sleep(1);
-		}
 		while (!relaxed) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST););
 				}
 				__sync_fetch_and_add(&args->stats[0], 50*i);
-		}
-
-		if (delay_mask & (1u<<args->x.cpu)) {
-				sleep(1);
 		}
 		while (relaxed) {
 				for (i=0; i<inc_count ; i++) {
