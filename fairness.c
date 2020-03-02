@@ -795,14 +795,14 @@ usage:
 						if (val>0)
 							nval++;
 						double s = time_delta / val;
-						if (min > s) min=s;
-						if (max < s) max=s;
 						//Get BW stats in ops per msec instead of per ns.
 						double bwt = val * 1000000.0 / (double)time_delta;
 						if (j==0) // for stat 0, accumulate bw for all threads
 							bw += bwt; 
 						if (report_bw) 
 							s=bwt;
+						if (min > s) min=s;
+						if (max < s) max=s;
 						p+=sprintf(p,",%.1f", s);
 						sum += s;
 						sum_squared += s*s;
