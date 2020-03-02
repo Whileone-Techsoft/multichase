@@ -22,6 +22,7 @@
 #include <math.h>
 #include <sched.h>
 #include <string.h>
+#include <sched.h>
 
 #include "cpu_util.h"
 #include "expand.h"
@@ -37,14 +38,15 @@
 
 char *stat_desc[MAX_STATS] = {"Acquires","NFails","NBusy","NMisc"};
 static char full_name[80];
+static char *sched_policy=NULL;
 
 typedef unsigned atomic_t;
 
 typedef union {
         struct {
             atomic_t count;
-            int cpu;
 			int counter;
+            int cpu;
 			int mode;
         } x;
 		atomic_t stats[MAX_STATS];
@@ -89,6 +91,33 @@ static void wait_for_startup(void)
 			pthread_cond_broadcast(&wait_cond);
         }
         pthread_mutex_unlock(&wait_mutex);
+}
+
+static void thread_schedme(int mycpu) {
+	if (sched_policy != NULL) {
+		int policy = SCHED_OTHER;
+		if (strstr(sched_policy, "FIFO") != NULL) {
+			policy = SCHED_FIFO;
+		}
+		if (strstr(sched_policy, "RR") != NULL) {
+			policy = SCHED_RR;
+		}
+		struct sched_param sp;
+		memset(&sp, 0, sizeof(sp));
+		sp.sched_priority = sched_get_priority_min(policy);
+		if (sched_setscheduler(0, policy, &sp) < 0) {
+			perror("Problem setting scheduling policy!");
+			exit(1);
+		}
+	}
+        // move to our target cpu
+	cpu_set_t cpu;
+	CPU_ZERO(&cpu);
+	CPU_SET(mycpu, &cpu);
+	if (sched_setaffinity(0, sizeof(cpu), &cpu)) {
+			perror("sched_setaffinity");
+			exit(1);
+	}
 }
 
 void __attribute__((noinline, optimize("no-unroll-loops"))) blackhole(unsigned long iters);
@@ -272,6 +301,8 @@ static inline void test_malloc(per_thread_t *args) {
 static void *null_thread(void *vp) {
 	unsigned long long *arg = (unsigned long long *)vp;
 	unsigned long long null_hold = global_counter[count_sweep].hold;
+	thread_schedme((int)*arg);
+	*arg=0;
 	work_section(null_hold, 0);
 	*arg = null_hold;
 	pthread_exit(vp);
@@ -284,6 +315,7 @@ static void *null_thread(void *vp) {
 static inline void test_thread_create(per_thread_t *args) {
 	unsigned long thread_count = inc_count;
 	unsigned long long null_hold = global_counter[count_sweep].hold;
+	int mycpu = args->x.cpu;
 	if (delay_mask & (1u<<args->x.cpu)) {
 			sleep(1);
 	}
@@ -295,7 +327,7 @@ static inline void test_thread_create(per_thread_t *args) {
 		int created=0, ok=0, fails=0, incomplete=0;
 		C++;
 		for (i=0; i<thread_count ; i++) {
-			retvals[i] = 0;
+			retvals[i] = mycpu;
 			tag[i] = 0;
 			int err = pthread_create(&tag[i], NULL, null_thread, &retvals[i]);
 			if (err == 0) {
@@ -517,18 +549,13 @@ static inline char *get_test_name(int mode, int lock_time, int captive) {
 }
 
 
+
+
 static void *worker(void *_args)
 {
         per_thread_t *args = _args;
+		thread_schedme(args->x.cpu);
         
-        // move to our target cpu
-        cpu_set_t cpu;
-        CPU_ZERO(&cpu);
-        CPU_SET(args->x.cpu, &cpu);
-        if (sched_setaffinity(0, sizeof(cpu), &cpu)) {
-                perror("sched_setaffinity");
-                exit(1);
-        }
 		unsigned long lock_time=global_counter[0].lock;
 
         wait_for_startup();
@@ -589,13 +616,16 @@ int main(int argc, char **argv)
 	int captive_mutex=0;
 
 	delay_mask = 0;
-	while ((c = getopt(argc, argv, "d:s:n:t:v:N:r:m:l:h:i:T:M:")) != -1) {
+	while ((c = getopt(argc, argv, "d:s:n:t:v:N:r:m:l:h:i:T:M:S:")) != -1) {
 			switch (c) {
 			case 'd':
 					delay_mask = strtoul(optarg, 0, 0);
 					break;
 			case 's':
 					sweep_count = strtoul(optarg, 0, 0);
+					break;
+			case 'S':
+					sched_policy = optarg;
 					break;
 			case 'n':
 					max_samples = strtoul(optarg, 0, 0);
