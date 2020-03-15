@@ -23,6 +23,8 @@
 #include <sched.h>
 #include <string.h>
 #include <sched.h>
+#include <semaphore.h>
+
 
 #include "cpu_util.h"
 #include "expand.h"
@@ -36,21 +38,21 @@
 #endif
 #define MAX_STATS 4
 
-char *stat_desc[MAX_STATS] = {"Acquires","NFails","NBusy","NMisc"};
+char *stat_desc[MAX_STATS] = {"Acquire-latency","NFails","NBusy","NMisc"};
 static char full_name[80];
 static char *sched_policy=NULL;
 
 typedef unsigned atomic_t;
 
 typedef union {
-        struct {
+        struct { /* Inputs */
             atomic_t count;
 			int counter;
             int cpu;
 			int mode;
+			atomic_t stats[MAX_STATS]; /* Outputs */
         } x;
-		atomic_t stats[MAX_STATS];
-        char pad[AVOID_FALSE_SHARING];
+        char pad[AVOID_FALSE_SHARING]; /* Padding to cache line size */
 } per_thread_t;
 
 typedef struct {
@@ -61,6 +63,7 @@ typedef struct {
         } x[NUM_COUNTERS];
         char pad1[CACHELINE_SIZE];
 		pthread_mutex_t mutex[NUM_COUNTERS];
+		sem_t semaphore[NUM_COUNTERS];
         char pad2[CACHELINE_SIZE];
 } global_t;
 
@@ -138,6 +141,68 @@ static inline void work_section(unsigned long count, int tmp) {
 }
 
 
+static void test_semaphore(per_thread_t *args) {
+	unsigned long critical_time = global_counter[count_sweep].lock;
+	unsigned long parallel_time = global_counter[count_sweep].hold;
+	volatile int tmp=0;
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	while (sweep_active) {
+		sem_t *p=&(global_counter[count_sweep].semaphore[0]);
+		sem_wait(p);
+		work_section(critical_time,tmp);
+		sem_post(p);
+		work_section(parallel_time,tmp);
+		__sync_fetch_and_add(&args->x.stats[0], 1);
+	}
+}
+
+static volatile int first_sem_worker=1;
+static void test_semaphore_master(per_thread_t *args) {
+	unsigned long worker_time = global_counter[count_sweep].lock;
+	unsigned long master_time = global_counter[count_sweep].hold;
+	volatile int tmp=0;
+	int workers = req_threads-1;
+	int master;
+	sem_t *sem0=&(global_counter[count_sweep].semaphore[0]);
+	sem_t *sem1=&(global_counter[count_sweep].semaphore[1]);
+	pthread_mutex_t *p=&(global_counter[0].mutex[0]);
+	pthread_mutex_lock(p);
+	if (first_sem_worker) {
+		master=1;
+		first_sem_worker=0;
+	} else {
+		master=0;
+	}
+	pthread_mutex_unlock(p);
+	
+	if (delay_mask & (1u<<args->x.cpu)) {
+			sleep(1);
+	}
+	if (master) {
+		while (sweep_active) {
+			int i;
+			for (i=0; i<workers; i++) {
+				sem_post(sem0); // send work to all workers
+			}
+			work_section(master_time,tmp); // simulate master preparing new work
+			for (i=0; i<workers; i++) {
+				sem_wait(sem1); // wait for all workers to signal completion
+			}
+			__sync_fetch_and_add(&args->x.stats[0], i);
+		}
+	} else {
+		while (sweep_active) {
+			sem_wait(sem0); // Wait for work
+			work_section(worker_time,tmp); // simulate working on data
+			sem_post(sem1); // Signal completion
+			__sync_fetch_and_add(&args->x.stats[0], 1);
+		}
+	}
+}
+
+
 static volatile int first=1;
 static void test_broadcast(void)
 {
@@ -171,7 +236,7 @@ static inline void test_cond(per_thread_t *args) {
 			test_broadcast();
 			work_section(parallel_time,tmp);
 		}
-		__sync_fetch_and_add(&args->stats[0], i);
+		__sync_fetch_and_add(&args->x.stats[0], i);
 	}
 }
 
@@ -194,8 +259,8 @@ static inline void test_mutex_lock_anemic(per_thread_t *args) {
 				fails++;
 			work_section(hold_time,tmp);
 		}
-		__sync_fetch_and_add(&args->stats[0], i);
-		__sync_fetch_and_add(&args->stats[1], fails);
+		__sync_fetch_and_add(&args->x.stats[0], i);
+		__sync_fetch_and_add(&args->x.stats[1], fails);
 	}
 }
 
@@ -226,9 +291,9 @@ static inline void test_mutex_trylock_anemic(per_thread_t *args) {
 			acquired++;
 			work_section(hold_time,tmp);
 		}
-		__sync_fetch_and_add(&args->stats[0], acquired);
-		__sync_fetch_and_add(&args->stats[1], fails);
-		__sync_fetch_and_add(&args->stats[2], busy);
+		__sync_fetch_and_add(&args->x.stats[0], acquired);
+		__sync_fetch_and_add(&args->x.stats[1], fails);
+		__sync_fetch_and_add(&args->x.stats[2], busy);
 	}
 }
 
@@ -262,9 +327,9 @@ static inline void test_mutex_trylock(per_thread_t *args) {
 			acquired++;
 			work_section(hold_time,tmp);
 		}
-		__sync_fetch_and_add(&args->stats[0], acquired);
-		__sync_fetch_and_add(&args->stats[1], fails);
-		__sync_fetch_and_add(&args->stats[2], busy);
+		__sync_fetch_and_add(&args->x.stats[0], acquired);
+		__sync_fetch_and_add(&args->x.stats[1], fails);
+		__sync_fetch_and_add(&args->x.stats[2], busy);
 	}
 }
 
@@ -294,8 +359,8 @@ static inline void test_malloc(per_thread_t *args) {
 		for (i=0; i<block_count ; i++) {
 			free(block[i]);
 		}
-		__sync_fetch_and_add(&args->stats[0], block_count);
-		__sync_fetch_and_add(&args->stats[1], tmp);
+		__sync_fetch_and_add(&args->x.stats[0], block_count);
+		__sync_fetch_and_add(&args->x.stats[1], tmp);
 	}
 }
 
@@ -351,10 +416,10 @@ static inline void test_thread_create(per_thread_t *args) {
 				}
 			}
 		}
-		__sync_fetch_and_add(&args->stats[0], created);
-		__sync_fetch_and_add(&args->stats[1], fails);
-		__sync_fetch_and_add(&args->stats[2], ok);
-		__sync_fetch_and_add(&args->stats[3], incomplete);
+		__sync_fetch_and_add(&args->x.stats[0], created);
+		__sync_fetch_and_add(&args->x.stats[1], fails);
+		__sync_fetch_and_add(&args->x.stats[2], ok);
+		__sync_fetch_and_add(&args->x.stats[3], incomplete);
 	}
 }
 
@@ -387,8 +452,8 @@ static inline void test_malloc_rand(per_thread_t *args) {
 		for (i=0; i<block_count ; i++) {
 			free(block[i]);
 		}
-		__sync_fetch_and_add(&args->stats[0], block_count);
-		__sync_fetch_and_add(&args->stats[1], tmp);
+		__sync_fetch_and_add(&args->x.stats[0], block_count);
+		__sync_fetch_and_add(&args->x.stats[1], tmp);
 	}
 	free(last_size);
 }
@@ -429,7 +494,7 @@ static inline void test_malloc_frag(per_thread_t *args) {
 			freed_blocks++;
 			block[i]=NULL;
 		}
-		__sync_fetch_and_add(&args->stats[0], freed_blocks);
+		__sync_fetch_and_add(&args->x.stats[0], freed_blocks);
 		freed_blocks=0;
 		// Now free the rest of the blocks
 		for (i=0; i<block_count ; i++) {
@@ -439,8 +504,8 @@ static inline void test_malloc_frag(per_thread_t *args) {
 			}
 			block[i] = NULL;
 		}
-		__sync_fetch_and_add(&args->stats[0], freed_blocks);
-		__sync_fetch_and_add(&args->stats[1], tmp);
+		__sync_fetch_and_add(&args->x.stats[0], freed_blocks);
+		__sync_fetch_and_add(&args->x.stats[1], tmp);
 	}
 	free(last_size);
 }
@@ -463,7 +528,7 @@ static inline void test_mutex_lock(per_thread_t *args) {
 			pthread_mutex_unlock(p);
 			work_section(hold_time,tmp);
 		}
-		__sync_fetch_and_add(&args->stats[0], i);
+		__sync_fetch_and_add(&args->x.stats[0], i);
 	}
 }
 
@@ -479,7 +544,7 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1););
 				}
-				__sync_fetch_and_add(&args->stats[0], 50*i);
+				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 
 		}
 
@@ -487,7 +552,7 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1); cpu_relax(););
 				}
-				__sync_fetch_and_add(&args->stats[0], 50*i);
+				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 		}
 	}
 	
@@ -505,13 +570,13 @@ static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST););
 				}
-				__sync_fetch_and_add(&args->stats[0], 50*i);
+				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 		}
 		while (relaxed) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); cpu_relax(););
 				}
-				__sync_fetch_and_add(&args->stats[0], 50*i);
+				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 		}
 	}
 	
@@ -526,7 +591,9 @@ char *test_name[] = {
 	"malloc Rand",
 	"malloc Frag",
 	"pthread_cond",
-	"pthread_create"
+	"pthread_create",
+	"semaphore_all2all",
+	"semaphone_12all"
 };
 
 
@@ -542,7 +609,6 @@ static inline char *get_test_name(int mode, int lock_time, int captive) {
 	sprintf(full_name,"TEST,%s%s\n",top, tag);
 	return full_name;
 }
-
 
 
 
@@ -592,6 +658,12 @@ static void *worker(void *_args)
 				stat_desc[2] = "NComplete";
 				stat_desc[3] = "NIncomplete";
 				test_thread_create(args);
+				break;
+			case 9:
+				test_semaphore(args);
+				break;
+			case 10:
+				test_semaphore_master(args);
 				break;
 			default:
 				test_sync_fetch_and_add(args);
@@ -701,6 +773,10 @@ usage:
 		printf("number of dummy threads,%d\n", inc_count);
 		printf("work per dummy thread,%d\n", hold_time);
 	}
+	if (strstr(myname, "semaphore")) {
+		printf("parallel time,%d\n", lock_time);
+		printf("protected time,%d\n", hold_time);
+	}
 	printf("Threads %ld\n", req_threads);
 	
 	
@@ -729,6 +805,7 @@ usage:
 			if (captive_mutex > 0) {
 				pthread_mutex_lock(&global_counter[i].mutex[j]);
 			}
+			sem_init(&global_counter[i].semaphore[j],1,1);
 		}
 	}
 	
@@ -793,7 +870,7 @@ usage:
 				usleep(sample_interval);
 				for (u = 0; u < req_threads; ++u) {
 					for (j=0; j < used_stats ; j++) {
-						samples[u*MAX_STATS+j] = __sync_lock_test_and_set(&thread_args[u].stats[j], 0);
+						samples[u*MAX_STATS+j] = __sync_lock_test_and_set(&thread_args[u].x.stats[j], 0);
 						//samples[u] = __sync_lock_test_and_set(&thread_args[u].x.count, 0);
 					}
 				}
@@ -871,6 +948,15 @@ usage:
 				stat_print(&global_stats[relaxed]);
 			}
 	}
+	/* Cleanup */
+	free(samples);
+	for (i=0; i<COUNT_SWEEP_MAX; i++) { 
+		for (j=0; j<NUM_COUNTERS; j++) {
+			pthread_mutex_destroy(&global_counter[i].mutex[j]);
+			sem_destroy(&global_counter[i].semaphore[j]);
+		}
+	}
+	
     return 0;
 }
 
