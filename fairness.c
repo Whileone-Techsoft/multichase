@@ -540,7 +540,7 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 	while (sweep_active) {
 		atomic_t *p=&(global_counter[count_sweep].x[cid].count);
 		int i;
-		while (!relaxed) {
+		while (!relaxed && sweep_active) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1););
 				}
@@ -548,14 +548,14 @@ static inline void test_sync_fetch_and_add(per_thread_t *args) {
 
 		}
 
-		while (relaxed) {
+		while (relaxed && sweep_active) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__sync_fetch_and_add(p, 1); cpu_relax(););
 				}
 				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 		}
 	}
-	
+	return;
 }
 
 static inline void test_atomic_fetch_and_add(per_thread_t *args) {
@@ -566,13 +566,13 @@ static inline void test_atomic_fetch_and_add(per_thread_t *args) {
 	while (sweep_active) {
 		atomic_t *p=&(global_counter[count_sweep].x[cid].count);
 		int i;
-		while (!relaxed) {
+		while (!relaxed && sweep_active) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST););
 				}
 				__sync_fetch_and_add(&args->x.stats[0], 50*i);
 		}
-		while (relaxed) {
+		while (relaxed && sweep_active) {
 				for (i=0; i<inc_count ; i++) {
 					x50(__atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); cpu_relax(););
 				}
@@ -669,7 +669,7 @@ static void *worker(void *_args)
 				test_sync_fetch_and_add(args);
 				break;
 		}
-        return NULL;
+	return NULL;
 }
 
 int main(int argc, char **argv)
@@ -790,7 +790,7 @@ usage:
 
 	// could do this more efficiently, but whatever
 	size_t nr_threads = 0;
-	int i,j;
+	int i=0,j=0;
 	for (i = 0; i < CPU_SETSIZE; ++i) {
 			if (CPU_ISSET(i, &cpus)) {
 					++nr_threads;
@@ -817,6 +817,7 @@ usage:
 	nr_to_startup = req_threads + 1;
 	size_t u;
 	int q = 0;
+	pthread_t *thread_markers = calloc(req_threads, sizeof(pthread_t));
 	for (u = 0; u < req_threads; ++u) {
 			while (!CPU_ISSET(q, &cpus)) {
 				q = (q+1) % (CPU_SETSIZE-1);
@@ -829,8 +830,7 @@ usage:
 			q = (q+1) % (CPU_SETSIZE-1);
 			thread_args[u].x.count = 0;
 			thread_args[u].x.mode=mode;
-			pthread_t dummy;
-			if (pthread_create(&dummy, NULL, worker, &thread_args[u])) {
+			if (pthread_create(&thread_markers[u], NULL, worker, &thread_args[u])) {
 					perror("pthread_create");
 					exit(1);
 			}
@@ -846,7 +846,7 @@ usage:
 			printf("%lu[%u],", u, thread_args[u].x.cpu);
 	}
 	printf("avg,stdev,min,max\n");
-	char msg[256];
+	char msg[2048];
 	stat_t stats[2][COUNT_SWEEP_MAX][MAX_STATS];
 	stat_t global_stats[2];
 	sprintf(msg,"Unrelaxed summary across %d global counts [latency avg in ns, bw in ops/mSec]",COUNT_SWEEP_MAX);
@@ -931,6 +931,10 @@ usage:
 		pthread_mutex_unlock(&global_counter[i].mutex[j]);
 	}
 	
+	for (u = 0; u < req_threads; ++u) {
+		void *ret;
+		pthread_join(thread_markers[u], &ret);
+	}
 	if (verbosity > 0) { 
 		for (relaxed = 0; relaxed < max_relax; ++relaxed) {
 			for (j=0; j < used_stats ; j++) {
